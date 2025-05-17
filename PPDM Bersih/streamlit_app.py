@@ -152,47 +152,58 @@ def load_face_detector():
         st.error(f"Failed to load face detector: {e}")
         return None, None
 
-# Feature extraction functions - copied from preprocessdata.py
+def preprocess_for_expression(image):
+    """Preprocessing to help with expressive faces"""
+    # Convert to grayscale
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # Apply CLAHE for better contrast
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    enhanced = clahe.apply(gray)
+    
+    # Apply bilateral filter to reduce noise
+    filtered = cv2.bilateralFilter(enhanced, 9, 75, 75)
+    
+    return filtered
+
 def crop(image, detector, predictor):
-    """Crop the face from the image using dlib"""
+    """More robust face cropping function"""
     if detector is None or predictor is None:
         return None
         
-    # Resize image for consistency
-    image = cv2.resize(image, (128, 128))
+    # Preprocess image for better detection
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     gray_equalized = cv2.equalizeHist(gray)
-    faces = detector(gray_equalized, 0)
+    
+    # Try detecting with different scales
+    for scale in [1.0, 1.25, 0.8]:
+        faces = detector(gray_equalized, int(scale))
+        if len(faces) > 0:
+            break
     
     if len(faces) == 0:
         return None
     
-    for face in faces:
-        landmarks = predictor(gray_equalized, face)
-        
-        def get_coords(idxs):
-            return [(landmarks.part(i).x, landmarks.part(i).y) for i in idxs]
-        
-        def create_mask(coords, shape):
-            mask = np.zeros(shape, dtype=np.uint8)
-            cv2.fillPoly(mask, [np.array(coords, np.int32)], 255)
-            return mask
-        
-        parts = {
-            "left_eye": range(36, 42),
-            "right_eye": range(42, 48),
-            "left_eyebrow": range(17, 22),
-            "right_eyebrow": range(22, 27),
-            "mouth": range(46, 68),
-            "jawline": range(0, 17),
-            "nose": range(27, 36),
-        }
-        
-        mask = sum([create_mask(get_coords(part), gray.shape) for part in parts.values()])
-        extracted = cv2.bitwise_and(gray, gray, mask=mask)
-        return extracted
+    # Get the largest face
+    face = max(faces, key=lambda rect: rect.width() * rect.height())
     
-    return None
+    # Get landmarks
+    landmarks = predictor(gray_equalized, face)
+    
+    # Get face coordinates
+    x_coords = [landmarks.part(i).x for i in range(68)]
+    y_coords = [landmarks.part(i).y for i in range(68)]
+    
+    # Expand the bounding box slightly
+    x_min, x_max = max(0, min(x_coords)-15), min(image.shape[1], max(x_coords)+15)
+    y_min, y_max = max(0, min(y_coords)-15), min(image.shape[0], max(y_coords)+15)
+    
+    # Crop and resize the face
+    cropped = gray_equalized[y_min:y_max, x_min:x_max]
+    if cropped.size == 0:
+        return None
+    
+    return cv2.resize(cropped, (128, 128))
 
 def compute_glcm_manual(image, distance=1, levels=256):
     """Compute Gray Level Co-occurrence Matrix manually"""
@@ -410,7 +421,7 @@ def create_results_image(original_img, cropped_face, prediction, class_names):
 # Streamlit app
 def main():
     st.set_page_config(
-        page_title="ANN Face Recognition Model", 
+        page_title="Enhanced ANN Face Recognition Model", 
         page_icon="🧠", 
         layout="wide"
     )
@@ -418,8 +429,8 @@ def main():
     # Sidebar
     st.sidebar.title("About")
     st.sidebar.info(
-        "This app uses an Artificial Neural Network (ANN) model to recognize faces. "
-        "Upload an image to get a prediction."
+        "This enhanced app uses an Artificial Neural Network (ANN) model to recognize faces, "
+        "with improved detection for expressive faces like anger."
     )
     
     st.sidebar.title("Model Configuration")
@@ -447,9 +458,14 @@ def main():
         st.sidebar.success("Shape predictor file uploaded successfully!")
     
     # Main content
-    st.title("Face Recognition with ANN")
+    st.title("Enhanced Face Recognition with ANN")
     st.markdown("""
-    This application uses an Artificial Neural Network to recognize faces.
+    This enhanced application uses an Artificial Neural Network to recognize faces, with improved handling of expressive faces.
+    
+    **Improvements made:**
+    - Better face detection for expressive faces (like anger)
+    - Enhanced preprocessing for difficult images
+    - More robust cropping algorithm
     
     **How to use:**
     1. Upload an image file containing a face
@@ -501,14 +517,29 @@ def main():
         
         # Check if all components are loaded before processing
         if all_components_loaded:
-            with st.spinner("Processing image..."):
+            with st.spinner("Processing image with enhanced detection..."):
                 # Process image
                 try:
-                    # Crop face
-                    cropped_face = crop(image, detector, predictor)
+                    # Preprocess for expression
+                    preprocessed = preprocess_for_expression(image)
+                    
+                    # Convert back to 3-channel for display (but use grayscale for processing)
+                    display_img = cv2.cvtColor(preprocessed, cv2.COLOR_GRAY2BGR)
+                    
+                    # Crop face with the new function
+                    cropped_face = crop(display_img, detector, predictor)
                     
                     if cropped_face is None:
-                        st.error("No face detected in the image. Please try another image.")
+                        # Try alternative approach with just face detection (no landmarks)
+                        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                        faces = detector(gray, 1)
+                        if len(faces) > 0:
+                            face = faces[0]
+                            cropped_face = gray[face.top():face.bottom(), face.left():face.right()]
+                            cropped_face = cv2.resize(cropped_face, (128, 128))
+                            st.warning("Used simple face detection (landmarks might be inaccurate)")
+                        else:
+                            st.error("No face detected in the image. Please try another image.")
                     else:
                         # Show cropped face
                         st.image(cropped_face, caption="Detected Face", width=300)
@@ -565,30 +596,30 @@ def main():
     
     # Instructions section
     st.markdown("---")
-    st.header("Instructions")
+    st.header("Enhanced Detection Features")
     st.markdown("""
+    ### Key Improvements
+    1. **Better Expression Handling**: Improved detection for faces showing strong expressions like anger
+    2. **Advanced Preprocessing**: CLAHE and bilateral filtering for better feature extraction
+    3. **Robust Cropping**: Multiple detection attempts with different scales and expanded bounding boxes
+    
     ### Required Files
     To use this application, you need to upload these files:
     1. **best_model.npy** - The trained ANN model file
     2. **onehot_encoder.pkl** - The one-hot encoder for class labels
     3. **shape_predictor_68_face_landmarks.dat** - Dlib's face landmark predictor
     
-    ### How It Works
-    1. The app detects faces in your uploaded image
-    2. It extracts GLCM, HOG, and LBP features from the detected face
-    3. These features are normalized and fed into the ANN model
-    4. The model predicts the class of the face
-    
     ### Troubleshooting
-    - If no face is detected, try an image with a clearer, frontal view of the face
-    - Ensure good lighting and minimal background clutter for better results
+    - If detection fails, try images with clearer facial features
+    - For anger expressions, ensure the face is reasonably frontal
+    - Good lighting and minimal obstructions improve results
     """)
     
     # Download example button
     if st.button("Download Example Files"):
         st.markdown("""
         You can download the required files from these sources:
-        - **shape_predictor_68_face_landmarks.dat**: Download from the official dlib website or models repository
+        - **shape_predictor_68_face_landmarks.dat**: Download from the official dlib website
         - **best_model.npy** and **onehot_encoder.pkl**: These should be generated from your training process
         """)
 
